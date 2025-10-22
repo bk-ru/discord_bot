@@ -50,9 +50,6 @@ def add_or_check_student(first_name, last_name, group):
             with pd.ExcelWriter(FILE_PATH, engine='openpyxl') as writer:
                 for sheet_name, sheet_df in excel_data.items():
                     sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"Добавлен {first_name} {last_name} в группу {group}.")
-        else:
-            print(f"{first_name} {last_name} уже присутствует в группе {group}.")
         return True
     except Exception as e:
         print(f"Ошибка при добавлении/проверке студента: {e}")
@@ -78,3 +75,28 @@ def ensure_group_sheet(group_name: str) -> bool:
     except Exception as e:
         print(f"Ошибка ensure_group_sheet('{group_name}'): {e}")
         raise
+
+
+def remove_group_sheet(group_name: str) -> bool:
+    """
+    Удаляет лист группы из Excel, если он найден.
+    Возвращает True при успешном удалении, иначе False.
+    """
+    ensure_excel_exists()
+    try:
+        excel_data = pd.read_excel(FILE_PATH, sheet_name=None, engine='openpyxl')
+        if group_name not in excel_data:
+            return False
+
+        del excel_data[group_name]
+
+        if not excel_data:
+            excel_data["General"] = pd.DataFrame(columns=['ИМЯ', 'ФАМИЛИЯ'])
+
+        with pd.ExcelWriter(FILE_PATH, engine='openpyxl') as writer:
+            for sheet_name, sheet_df in excel_data.items():
+                sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
+        return True
+    except Exception as e:
+        print(f"Ошибка remove_group_sheet('{group_name}'): {e}")
+        return False

@@ -159,9 +159,6 @@ class DeleteChannelView(ui.View):
         await self._delete_original_message(interaction)
 
 
-
-
-
 class EventsCog(commands.Cog):
     """События Discord: регистрация, структура групп, логирование."""
 
@@ -185,6 +182,44 @@ class EventsCog(commands.Cog):
             self.feedback_channels[guild.id] = fb
             await self.setup_unknown_role_and_channel(guild)
             await self.log_action(guild, f"🚀 Бот готов к работе на сервере **{guild.name}**.")
+
+            unknown_role = discord.utils.get(guild.roles, name="Неизвестные")
+            if not unknown_role:
+                unknown_role = await self.get_or_create_role(guild, "Неизвестные")
+
+            total_checked = 0
+            total_dialogs_started = 0
+
+            for member in guild.members:
+                if member.bot:
+                    continue
+                total_checked += 1
+
+                # 1️⃣ Если нет ролей вообще — добавляем 'Неизвестные'
+                if len(member.roles) == 1:
+                    await member.add_roles(unknown_role)
+                    await self.log_action(guild, f"⚙️ {member.mention} не имел ролей — назначена роль 'Неизвестные'.")
+                    await self.start_registration_dialog(member, guild, unknown_role)
+                    total_dialogs_started += 1
+                    continue
+
+                # 2️⃣ Если роль 'Неизвестные' уже есть — тоже запускаем регистрацию
+                if unknown_role in member.roles:
+                    try:
+                        await self.start_registration_dialog(member, guild, unknown_role)
+                        total_dialogs_started += 1
+                        await self.log_action(guild, f"📩 Повторно запущен диалог регистрации для {member.display_name}.")
+                    except discord.Forbidden:
+                        await self.log_action(
+                            guild,
+                            f"⚠️ Не удалось отправить сообщение участнику {member.display_name} (возможно, закрыты ЛС)."
+                        )
+
+            await self.log_action(
+                guild,
+                f"🔎 Проверка завершена: обработано {total_checked} участников, "
+                f"запущено {total_dialogs_started} диалогов регистрации."
+            )
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
@@ -212,7 +247,6 @@ class EventsCog(commands.Cog):
                 ):
                     try:
                         await msg.delete()
-                        print(f"🧹 Удалено старое сообщение feedback о {member.display_name}")
                     except Exception as e:
                         print(f"⚠️ Не удалось удалить сообщение feedback: {e}")
         except Exception as e:
@@ -231,19 +265,75 @@ class EventsCog(commands.Cog):
         # ⚙️ Отправка выбора
         if found_channel:
             feedback = await self.get_or_create_feedback_channel(guild)
-            view = ChannelConflictView(member, category, personal_channel, feedback)
+            view = DeleteChannelView(found_channel, feedback)
             await feedback.send(
-                f'⚠️ Текстовый канал "{member.display_name}" в категории "{category.name}" уже существует.\n'
-                f'Выберите действие:',
+                f"⚠️ Пользователь **{member.display_name}** покинул сервер.\n"
+                f"Обнаружен его личный канал: {found_channel.mention}\n"
+                f"Хотите удалить этот канал?",
                 view=view
             )
-
             await self.log_action(guild, f"👋 {member.display_name} покинул сервер. Найден личный канал {found_channel.name} (по topic).")
+
         else:
             await feedback.send(
                 f"ℹ️ Пользователь **{member.display_name}** покинул сервер, личный канал не найден."
             )
             await self.log_action(guild, f"ℹ️ {member.display_name} покинул сервер. Приватный канал не найден.")
+    
+    async def send_help_message(self, channel: discord.TextChannel, member: discord.Member, is_personal: bool = False):
+        """Отправляет адаптированное приветствие и список доступных команд в канал."""
+        user = member
+        embed = discord.Embed(
+            title="📘 Добро пожаловать!",
+            color=discord.Color.blue()
+        )
+
+        # Раздел — описание канала
+        if is_personal:
+            embed.description = (
+                f"👋 Привет, {user.mention}!\n"
+                f"Это **твой личный канал**. Здесь ты можешь отправлять свои лабораторные работы, "
+                f"задавать вопросы преподавателю и получать обратную связь.\n\n"
+                f"Только ты и преподаватели видят этот канал."
+            )
+        else:
+            embed.description = (
+                f"🎓 Это **общий канал группы**.\n"
+                f"Здесь преподаватель будет публиковать важные объявления, материалы и практику. "
+                f"Вы также можете задавать здесь вопросы и обсуждать задания со своей группой."
+            )
+
+        # Раздел — команды (динамически, как в HelpCog)
+        roles = [r.name.lower() for r in user.roles]
+        is_admin = user.guild_permissions.administrator
+
+        commands_text = (
+            "`!info` — Информация о боте.\n"
+            "`!ping` — Проверка задержки.\n"
+            "`!help` — Показать список команд.\n"
+        )
+
+        if any(r for r in roles if r not in ["@everyone", "неизвестные"]) and not is_admin:
+            commands_text += (
+                "`!labs` — Список лабораторных.\n"
+                "`!submit <номер>` — Отправить работу.\n"
+                "`!status <номер>` — Проверить статус.\n"
+            )
+
+        if is_admin or any("преподаватель" in r for r in roles):
+            commands_text += (
+                "`!addgroup <название>` — Добавить группу.\n"
+                "`!reloadlist` — Перезагрузить список студентов.\n"
+                "`!announce <текст>` — Объявление всем.\n"
+                "`!cleanup_feedback` — Очистить канал feedback.\n"
+            )
+
+        embed.add_field(name="💡 Доступные команды", value=commands_text, inline=False)
+
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"⚠️ Не удалось отправить приветствие в {channel.name}: {e}")
 
 
 
@@ -336,6 +426,8 @@ class EventsCog(commands.Cog):
                 },
             )
             await self.log_action(guild, f"💬 Создан групповой канал #{group_channel_name}.")
+            await self.send_help_message(group_channel, member, is_personal=False)
+
 
         # Персональный канал
         personal_channel_name = f"{last_name.lower()}-{first_name.lower()}"
@@ -352,6 +444,7 @@ class EventsCog(commands.Cog):
                 topic=str(member.id)
             )
             await self.log_action(guild, f"👤 Создан личный канал {personal_channel.mention} для {member.display_name}.")
+            await self.send_help_message(personal_channel, member, is_personal=True)
         else:
             # ⚠️ Новый лог и вызов интерактивного выбора
             await self.log_action(guild, f"⚠️ Личный канал {personal_channel.name} уже существует для {member.display_name}.")
@@ -389,18 +482,47 @@ class EventsCog(commands.Cog):
             await channel.edit(overwrites=overwrites)
             await self.log_action(guild, "📩 Канал #неизвестные найден, права доступа обновлены.")
 
-    async def get_or_create_feedback_channel(self, guild):
-        """Создаёт или возвращает канал логов бота."""
-        channel_name = f"{self.bot.user.name.lower()}-feedback"
-        channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if not channel:
+    async def get_or_create_feedback_channel(self, guild: discord.Guild) -> discord.TextChannel:
+        """Возвращает канал feedback, создавая при необходимости.
+        Размещает его в категории с названием бота."""
+        bot_name = guild.me.display_name if guild.me else "Bot"
+
+        # 🗂️ Ищем категорию с именем бота
+        category = discord.utils.get(guild.categories, name=bot_name)
+        if not category:
+            try:
+                category = await guild.create_category(bot_name)
+                print(f"📁 Создана категория {bot_name}")
+            except Exception as e:
+                print(f"⚠️ Не удалось создать категорию {bot_name}: {e}")
+                category = None
+
+        # 🔍 Проверяем существование канала feedback
+        feedback = discord.utils.get(guild.text_channels, name=f"{bot_name.lower()}-feedback")
+        if feedback:
+            # Если канал найден, но не в нужной категории — перемещаем
+            if feedback.category != category and category:
+                await feedback.edit(category=category)
+            return feedback
+
+        # 🆕 Создаём новый канал в категории
+        try:
             overwrites = {
-                guild.default_role: PermissionOverwrite(view_channel=False),
-                guild.me.top_role: PermissionOverwrite(view_channel=True, send_messages=True),
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
             }
-            channel = await guild.create_text_channel(channel_name, overwrites=overwrites)
-            print(f"Создан feedback канал {channel_name}")
-        return channel
+            feedback = await guild.create_text_channel(
+                f"{bot_name.lower()}-feedback",
+                category=category,
+                overwrites=overwrites
+            )
+            print(f"📝 Создан канал {feedback.name} в категории {bot_name}")
+            await feedback.send(f"📣 Канал создан автоматически для логов и сообщений от {bot_name}.")
+            return feedback
+        except Exception as e:
+            print(f"⚠️ Не удалось создать канал feedback: {e}")
+            return None
+
 
     async def log_action(self, guild: discord.Guild, message: str):
         """Пишет сообщение в feedback-канал."""
@@ -409,3 +531,8 @@ class EventsCog(commands.Cog):
             fb = await self.get_or_create_feedback_channel(guild)
             self.feedback_channels[guild.id] = fb
         await fb.send(message)
+
+
+async def setup(bot: commands.Bot):
+    """Extension entry point for discord.py."""
+    await bot.add_cog(EventsCog(bot))
