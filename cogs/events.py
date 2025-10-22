@@ -74,6 +74,9 @@ class ChannelConflictView(ui.View):
             self.member.guild.default_role: PermissionOverwrite(view_channel=False),
             self.member: PermissionOverwrite(view_channel=True, send_messages=True),
         }
+        bot_member = self.category.guild.me
+        if bot_member:
+            overwrites[bot_member] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         new_channel = await self.category.create_text_channel(
             new_name, overwrites=overwrites, topic=str(self.member.id)
         )
@@ -105,6 +108,14 @@ class ChannelConflictView(ui.View):
             send_messages=True,
             read_message_history=True,
         )
+        bot_member = interaction.guild.me
+        if bot_member:
+            await self.existing_channel.set_permissions(
+                bot_member,
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+            )
         await interaction.response.send_message(
             f"✅ Пользователь добавлен в существующий канал {self.existing_channel.mention}.",
             ephemeral=True,
@@ -481,6 +492,9 @@ class EventsCog(commands.Cog):
                 group_role: PermissionOverwrite(view_channel=False),
                 member: PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
             }
+            bot_member = guild.me
+            if bot_member:
+                overwrites[bot_member] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             personal_channel = await category.create_text_channel(
                 personal_channel_name,
                 overwrites=overwrites,
@@ -498,6 +512,17 @@ class EventsCog(commands.Cog):
                 f'Выберите действие:',
                 view=view
             )
+        bot_member = guild.me
+        if bot_member and personal_channel:
+            try:
+                await personal_channel.set_permissions(
+                    bot_member,
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                )
+            except Exception:
+                pass
 
     # -------------------------------------------------------------------------
     # Вспомогательные методы

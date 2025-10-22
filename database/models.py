@@ -31,8 +31,11 @@ class LabWork(models.Model):
     file_url = fields.TextField(null=True)  # Ссылка на прикреплённый файл (Discord attachment URL)
     status = fields.CharField(max_length=20, default="отправлено")  # отправлено / на доработке / зачтено
     feedback = fields.TextField(null=True)  # Комментарий преподавателя
-    submitted_at = fields.DatetimeField(auto_now_add=True)
-    updated_at = fields.DatetimeField(auto_now=True)
+    submitted_at = fields.DatetimeField(auto_now_add=True)   # когда впервые отправили
+    updated_at   = fields.DatetimeField(auto_now=True)       # любое обновление
+
+    teacher_message_id = fields.BigIntField(null=True)       # ID сообщения в канале преподавателя
+    teacher_channel_id = fields.BigIntField(null=True)       # ID канала преподавателя
 
     class Meta:
         table = "labworks"
