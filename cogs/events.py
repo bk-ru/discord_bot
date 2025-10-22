@@ -182,6 +182,8 @@ class EventsCog(commands.Cog):
             self.feedback_channels[guild.id] = fb
             await self.setup_unknown_role_and_channel(guild)
             await self.log_action(guild, f"🚀 Бот готов к работе на сервере **{guild.name}**.")
+            
+            await self.sync_users_from_guild(guild)
 
             unknown_role = discord.utils.get(guild.roles, name="Неизвестные")
             if not unknown_role:
@@ -335,6 +337,47 @@ class EventsCog(commands.Cog):
         except Exception as e:
             print(f"⚠️ Не удалось отправить приветствие в {channel.name}: {e}")
 
+    async def sync_users_from_guild(self, guild: discord.Guild):
+        """Добавляет в базу всех участников, которых ещё нет."""
+        from database.models import User
+        import pandas as pd
+        from utils.file_manager import file_path
+
+        df = pd.read_excel(file_path, None)  # загружаем все листы
+        all_known = {}
+        for sheet, data in df.items():
+            for _, row in data.iterrows():
+                full_name = f"{str(row['ИМЯ']).strip()} {str(row['ФАМИЛИЯ']).strip()}"
+                all_known[full_name.lower()] = sheet  # { "иван иванов": "ГР-01", ... }
+
+        created_count = 0
+        for member in guild.members:
+            if member.bot:
+                continue
+
+            existing = await User.get_or_none(discord_id=member.id)
+            if existing:
+                continue  # уже в базе
+
+            display = member.display_name.strip().split()
+            if len(display) >= 2:
+                first, last = display[0], display[1]
+                group = all_known.get(f"{first.lower()} {last.lower()}", "Неизвестные")
+            else:
+                first, last, group = member.display_name, "-", "Неизвестные"
+
+            await User.create(
+                discord_id=member.id,
+                first_name=first,
+                last_name=last,
+                group=group
+            )
+            created_count += 1
+
+        await self.log_action(
+            guild,
+            f"🔁 Синхронизированы пользователи: добавлено {created_count} записей в базу."
+        )
 
 
 

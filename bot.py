@@ -28,6 +28,7 @@ async def load_extensions():
     """Асинхронная загрузка когов."""
     await bot.load_extension("cogs.events")
     await bot.load_extension("cogs.commands")
+    await bot.load_extension("cogs.commands_labs")
     print("🔧 Коги успешно загружены.")
 
 
