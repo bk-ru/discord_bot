@@ -6,8 +6,6 @@ bot.py
 import discord
 from discord.ext import commands
 from config import TOKEN
-from cogs.events import EventsCog
-from cogs.commands import BasicCommands
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -27,6 +25,7 @@ async def on_ready():
 async def load_extensions():
     """Асинхронная загрузка когов."""
     await bot.load_extension("cogs.events")
+    await bot.load_extension("cogs.general_commands")
     await bot.load_extension("cogs.commands")
     await bot.load_extension("cogs.commands_labs")
     print("🔧 Коги успешно загружены.")

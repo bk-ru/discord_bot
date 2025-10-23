@@ -1,75 +1,41 @@
-from discord.ext import commands
+﻿from discord.ext import commands
 import discord
-from discord import ui, ButtonStyle, Interaction
 from database.models import User, LabWork
 from tortoise.exceptions import DoesNotExist
 from typing import Union
-import traceback
-import re
 
-async def _safe_respond(interaction, content, *, ephemeral=True):
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(content, ephemeral=ephemeral)
-        else:
-            await interaction.response.send_message(content, ephemeral=ephemeral)
-    except Exception as e:
-        cog = interaction.client.get_cog("LabsCog")
-        if cog and hasattr(cog, "_log_feedback"):
-            await cog._log_feedback(interaction.guild, f"❌ safe_respond: {e}")
+from utils.feedback import ensure_feedback_channel, send_feedback_message
+from cogs.labs.views import LabReviewView
+from cogs.labs.utils import safe_respond
 
 class LabsCog(commands.Cog):
     """Команды для сдачи и проверки лабораторных работ."""
 
     def __init__(self, bot):
         self.bot = bot
+        self.feedback_channels: dict[int, discord.TextChannel] = {}
         
     async def _get_or_create_feedback_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
-        """Возвращает канал {bot}-feedback, создаёт при необходимости в категории с названием бота."""
-        try:
-            bot_member = guild.me
-            bot_name = bot_member.display_name if bot_member else "Bot"
+        cached = self.feedback_channels.get(guild.id)
+        if cached and cached.guild:
+            return cached
 
-            # Категория под имя бота
-            category = discord.utils.get(guild.categories, name=bot_name)
-            if not category:
-                category = await guild.create_category(bot_name, reason="Категория под служебные каналы бота")
-            
-            # Сам канал
-            ch_name = f"{bot_name.lower()}-feedback"
-            channel = discord.utils.get(guild.text_channels, name=ch_name)
-            if channel and channel.category != category:
-                # Перенесём в правильную категорию
-                await channel.edit(category=category)
-                return channel
-
-            if not channel:
-                overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                    guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-                }
-                channel = await guild.create_text_channel(
-                    ch_name, category=category, overwrites=overwrites, reason="Лог действий бота"
-                )
-                try:
-                    await channel.send(f"📝 Канал логирования для {bot_name} создан.")
-                except Exception:
-                    pass
-            return channel
-        except Exception as e:
-            print(f"[feedback] Не удалось создать/получить feedback-канал: {e}")
-            return None
+        channel = await ensure_feedback_channel(guild)
+        if channel:
+            self.feedback_channels[guild.id] = channel
+        return channel
 
     async def _log_feedback(self, guild: discord.Guild, text: str) -> None:
-        """Пишет сообщение в feedback-канал (с защитой от ошибок)."""
-        try:
-            ch = await self._get_or_create_feedback_channel(guild)
-            if ch:
-                await ch.send(text)
-            else:
-                print(f"[feedback:FALLBACK] {text}")
-        except Exception as e:
-            print(f"[feedback] Ошибка при отправке сообщения: {e} | {text}")
+        channel = await self._get_or_create_feedback_channel(guild)
+        if channel:
+            try:
+                await channel.send(text)
+                return
+            except Exception:
+                pass
+        await send_feedback_message(guild, text)
+
+
 
     # -------------------- Команды студента --------------------
 
@@ -554,301 +520,5 @@ class LabsCog(commands.Cog):
             await self._log_feedback(ctx.guild, f"❌ Ошибка при публикации в {teacher_channel.mention}: `{e}`")
             return False        
 
-class LabReviewView(ui.View):
-    """Кнопки для проверки лабораторной преподавателем."""
-
-    def __init__(self, labwork):
-        super().__init__(timeout=None)
-        self.labwork = labwork  # объект ORM LabWork
-
-    async def _get_student(self, guild: discord.Guild, interaction: Interaction):
-        user_obj = getattr(self.labwork, "user", None)
-        if not user_obj:
-            try:
-                await self.labwork.fetch_related("user")
-                user_obj = self.labwork.user
-            except Exception:
-                user_obj = await User.get_or_none(id=getattr(self.labwork, "user_id", None))
-
-        discord_member = None
-        discord_id = getattr(user_obj, "discord_id", None) if user_obj else None
-
-        if discord_id:
-            discord_member = guild.get_member(discord_id) or await guild.fetch_member(discord_id)
-
-        # Резерв: достаём из сообщения и, если нужно, записываем discord_id в БД
-        if discord_member is None:
-            parsed = await self._extract_student_from_teacher_message(interaction)
-            if parsed:
-                discord_member = parsed
-                if user_obj and (not getattr(user_obj, "discord_id", None) or user_obj.discord_id != parsed.id):
-                    try:
-                        await User.filter(id=user_obj.id).update(discord_id=parsed.id)  # фиксируем в БД
-                        user_obj.discord_id = parsed.id
-                    except Exception:
-                        pass
-
-        return discord_member, user_obj
-    
-    async def _extract_student_from_teacher_message(self, interaction: Interaction) -> discord.Member | None:
-        msg_id = getattr(self.labwork, "teacher_message_id", None)
-        channel_id = getattr(self.labwork, "teacher_channel_id", None)
-        if not msg_id:
-            return None
-
-        channel: discord.TextChannel | None = None
-        if channel_id:
-            channel = interaction.guild.get_channel(channel_id)
-        if channel is None or not isinstance(channel, discord.TextChannel):
-            channel = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
-        if channel is None:
-            return None
-
-        try:
-            msg = await channel.fetch_message(msg_id)
-        except Exception:
-            return None
-
-        # 1) если есть прямые mentions — берём первого
-        if msg.mentions:
-            m = msg.mentions[0]
-            return interaction.guild.get_member(m.id) or await interaction.guild.fetch_member(m.id)
-
-        # 2) иначе пробуем парсить из embed.description "👤 Студент: <@123...>"
-        if msg.embeds:
-            desc = (msg.embeds[0].description or "")
-            m = re.search(r"<@!?(\d+)>", desc)
-            if m:
-                uid = int(m.group(1))
-                try:
-                    return interaction.guild.get_member(uid) or await interaction.guild.fetch_member(uid)
-                except Exception:
-                    return None
-        return None
-
-    async def _process_result(
-        self,
-        interaction: Interaction,
-        *,
-        status: str,
-        teacher_reply: str,
-        feedback: str | None = None,
-    ) -> None:
-        """Сохраняет статус, уведомляет студента, очищает сообщение преподавателя."""
-        self.labwork.status = status
-        if feedback is not None:
-            self.labwork.feedback = feedback
-        try:
-            await self.labwork.save(update_fields=["status", "feedback"])
-        except Exception as e:
-            cog = interaction.client.get_cog("LabsCog")
-            if cog and hasattr(cog, "_log_feedback"):
-                await cog._log_feedback(interaction.guild, f"❌ save(status/feedback) failed: {e}")
-
-        await self._notify_student_and_channel(interaction, status, feedback)
-        await _safe_respond(interaction, teacher_reply, ephemeral=True)
-        await self._delete_teacher_message(interaction)
-
-        student_for_log, user_obj = await self._get_student(interaction.guild, interaction)
-        student_label = (
-            student_for_log.mention
-            if student_for_log
-            else (f"<@{getattr(user_obj, 'discord_id', None)}>" if user_obj and getattr(user_obj, "discord_id", None) else f"db_user_id={getattr(self.labwork, 'user_id', None)}")
-        )
-        
-        cog = interaction.client.get_cog("LabsCog")
-        if cog and hasattr(cog, "_log_feedback"):
-            try:
-                await cog._log_feedback(
-                    interaction.guild,
-                    (
-                        f"🛠️ Лабораторная №{self.labwork.lab_number} для {student_label} "
-                        f"отмечена как {status.upper()} преподавателем {interaction.user.mention}. "
-                        f"Комментарий: {feedback or '—'}."
-                    )
-                )
-            except Exception:
-                pass
-
-    async def _notify_student_and_channel(
-        self,
-        interaction: Interaction,
-        status: str,
-        feedback: str | None,
-    ) -> None:
-        """Отправляет уведомления студенту в личку и его приватный канал."""
-        student, user_obj = await self._get_student(interaction.guild, interaction)
-        discord_id = getattr(user_obj, "discord_id", None) if user_obj else None
-
-        base_message = (
-            f"🧪 Лабораторная №{self.labwork.lab_number} "
-            f"помечена преподавателем {interaction.user.mention} как **{status.upper()}**."
-        )
-        if feedback:
-            base_message += f"\n💬 Комментарий: {feedback}"
-
-        log_bits: list[str] = []
-
-        if not user_obj:
-            log_bits.append("ORM-запись пользователя не найдена; уведомление пропущено.")
-            cog = interaction.client.get_cog("LabsCog")
-            if cog and hasattr(cog, "_log_feedback"):
-                try:
-                    await cog._log_feedback(interaction.guild, " | ".join(log_bits))
-                except Exception:
-                    pass
-            return
-
-        student_label = (
-            student.mention if student else (f"<@{discord_id}>" if discord_id else "неизвестен")
-        )
-        log_bits.append(
-            f"Статус лабораторной №{self.labwork.lab_number}: {status}. Студент {student_label} (discord_id={discord_id})."
-        )
-
-        if student:
-            try:
-                await student.send(base_message)
-                log_bits.append("DM: отправлено.")
-            except Exception as dm_err:
-                log_bits.append(f"DM: не доставлено ({dm_err}).")
-        else:
-            log_bits.append("DM: пропущено (участник не найден на сервере).")
-
-        # ищем личный канал по topic или названию фамилия-имя
-        target_id = student.id if student else discord_id
-        def _is_personal(ch: discord.TextChannel) -> bool:
-            topic_value = (ch.topic or "").strip()
-            if target_id and topic_value == str(target_id):
-                return True
-            if topic_value and topic_value == str(self.labwork.user_id):
-                return True
-            first = (getattr(user_obj, "first_name", "") or "").strip().lower()
-            last = (getattr(user_obj, "last_name", "") or "").strip().lower()
-            if not first or not last:
-                return False
-            expected_name = f"{last.replace(' ', '-')}-{first.replace(' ', '-')}"
-            alt_name = f"{first.replace(' ', '-')}-{last.replace(' ', '-')}"
-            if ch.name in (expected_name, alt_name):
-                return True
-            if ch.name.startswith(f"{expected_name}-") or ch.name.startswith(f"{alt_name}-"):
-                return True
-            return False
-
-        personal_channel = discord.utils.find(
-            lambda ch: isinstance(ch, discord.TextChannel) and _is_personal(ch),
-            interaction.guild.text_channels,
-        )
-        if personal_channel:
-            mention_prefix = (
-                student.mention if student else (f"<@{target_id}>" if target_id else user_obj.first_name)
-            )
-            channel_message = f"{mention_prefix} {base_message}"
-            try:
-                await personal_channel.send(channel_message)
-                log_bits.append(f"Канал {personal_channel.mention} (id={personal_channel.id}): отправлено.")
-            except Exception as ch_err:
-                log_bits.append(f"Канал {personal_channel.mention} (id={getattr(personal_channel, 'id', '?')}): ошибка ({ch_err}).")
-        else:
-            expected_name = (
-                f"{(getattr(user_obj, 'last_name', '') or '').lower()}-"
-                f"{(getattr(user_obj, 'first_name', '') or '').lower()}"
-            )
-            log_bits.append(
-                f"Личный канал: не найден (target_id={target_id}, ожидаемые имена '{expected_name}' / "
-                f"'{(getattr(user_obj, 'first_name', '') or '').lower()}-"
-                f"{(getattr(user_obj, 'last_name', '') or '').lower()}')."
-            )
-
-        teacher_channel_id = getattr(self.labwork, "teacher_channel_id", None)
-        teacher_message_id = getattr(self.labwork, "teacher_message_id", None)
-        log_bits.append(f"ID канала преподавателя: {teacher_channel_id}, msg_id: {teacher_message_id}.")
-        comment_text = feedback if feedback else "—"
-        log_bits.append(f"Feedback: статус='{status}', комментарий='{comment_text}'.")
-
-        cog = interaction.client.get_cog("LabsCog")
-        if cog and hasattr(cog, "_log_feedback"):
-            try:
-                await cog._log_feedback(interaction.guild, " | ".join(log_bits))
-            except Exception:
-                pass
-
-    async def _delete_teacher_message(self, interaction: Interaction) -> None:
-        """Удаляет сообщение с кнопками из канала преподавателя и очищает ссылки."""
-        msg_id = getattr(self.labwork, "teacher_message_id", None)
-        channel_id = getattr(self.labwork, "teacher_channel_id", None)
-        if not msg_id:
-            return
-
-        channel: discord.TextChannel | None = None
-        if channel_id:
-            channel = interaction.guild.get_channel(channel_id)
-        if channel is None or not isinstance(channel, discord.TextChannel):
-            channel = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
-
-        if channel:
-            try:
-                msg = await channel.fetch_message(msg_id)
-                await msg.delete()
-            except Exception:
-                pass
-
-        self.labwork.teacher_message_id = None
-        self.labwork.teacher_channel_id = None
-        try:
-            await self.labwork.save(update_fields=["teacher_message_id", "teacher_channel_id"])
-        except Exception as e:
-            cog = interaction.client.get_cog("LabsCog")
-            if cog and hasattr(cog, "_log_feedback"):
-                await cog._log_feedback(interaction.guild, f"⚠️ cleanup pointers failed: {e}")
-
-    @ui.button(label="Зачтено ✅", style=ButtonStyle.success)
-    async def accept(self, interaction: Interaction, button: ui.Button):
-        await self._process_result(
-            interaction,
-            status="зачтено",
-            teacher_reply=f"✅ Работа №{self.labwork.lab_number} зачтена.",
-        )
-
-    @ui.button(label="На доработку 🛠", style=ButtonStyle.danger)
-    async def review(self, interaction: Interaction, button: ui.Button):
-        modal = FeedbackModal(self.labwork, parent_view=self)
-        await interaction.response.send_modal(modal)
-
-
-class FeedbackModal(ui.Modal, title="Комментарий к работе"):
-    feedback = ui.TextInput(label="Комментарий преподавателя", style=discord.TextStyle.paragraph, required=True)
-
-    def __init__(self, labwork, parent_view: LabReviewView):
-        super().__init__()
-        self.labwork = labwork
-        self.parent_view = parent_view
-
-    async def on_submit(self, interaction: Interaction):
-        try:
-            # Если операция может занять время — можно раскомментировать defer:
-            # await interaction.response.defer(ephemeral=True)
-
-            await self.parent_view._process_result(
-                interaction,
-                status="на доработке",
-                teacher_reply="📬 Работа отправлена студенту на доработку.",
-                feedback=self.feedback.value,
-            )
-        except Exception as e:
-            tb = traceback.format_exc()
-            cog = interaction.client.get_cog("LabsCog")
-            if cog and hasattr(cog, "_log_feedback"):
-                await cog._log_feedback(
-                    interaction.guild,
-                    f"❌ Modal submit failed: {e}\n```py\n{tb}\n```"
-                )
-            # Чтобы Discord не показал красную ошибку — даём явный ответ
-            await _safe_respond(
-                interaction,
-                "⚠️ Не удалось сохранить комментарий. Подробности в feedback.",
-                ephemeral=True
-            )
-            
 async def setup(bot):
     await bot.add_cog(LabsCog(bot))

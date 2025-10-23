@@ -1,4 +1,4 @@
-"""
+﻿"""
 cogs/events.py
 Полная версия с расширенным логированием действий бота:
 - Группы создаются как категории.
@@ -10,165 +10,14 @@ cogs/events.py
 import asyncio
 import discord
 from discord.ext import commands
-from discord import PermissionOverwrite, ui
+from discord import PermissionOverwrite
 from database.init_db import init_db
 from utils.file_manager import add_or_check_student, ensure_excel_exists
+from utils.feedback import ensure_feedback_channel, send_feedback_message
+from cogs.views import ChannelConflictView, DeleteChannelView
 
-from discord import ui, PermissionOverwrite
 
 # cogs/events.py
-
-class ChannelConflictView(ui.View):
-    """
-    Интерактивный выбор: создать новый личный канал
-    или добавить пользователя в существующий.
-    После выбора — исходное сообщение удаляется.
-    """
-
-    def __init__(self, member: discord.Member, category: discord.CategoryChannel,
-                 existing_channel: discord.TextChannel, feedback_channel: discord.TextChannel = None):
-        super().__init__(timeout=None)
-        self.member = member
-        self.category = category
-        self.existing_channel = existing_channel
-        self.feedback_channel = feedback_channel  # ✅ добавлено, чтобы избежать AttributeError
-
-    async def _delete_original_message(self, interaction: discord.Interaction):
-        """Удаляет исходное сообщение с кнопками (если возможно)."""
-        try:
-            await interaction.message.delete()
-        except Exception as e:
-            try:
-                await interaction.followup.send(f"⚠️ Не удалось удалить сообщение: {e}", ephemeral=True)
-            except Exception:
-                pass  # даже если не удалось отправить followup — не критично
-
-    @ui.button(label="Создать новый", style=discord.ButtonStyle.primary)
-    async def create_new(self, interaction: discord.Interaction, button: ui.Button):
-        """Создание нового личного канала с индексом +1 и обновлением topic."""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "⛔ Только администратор может выполнять это действие.", ephemeral=True
-            )
-            await self._delete_original_message(interaction)
-            return
-
-        # 🧹 Сначала очищаем старые topic с этим ID
-        for ch in self.category.text_channels:
-            if ch.topic and ch.topic.strip() == str(self.member.id):
-                try:
-                    await ch.edit(topic=None)
-                    print(f"⚙️ Очистил topic у старого канала {ch.name} (ID совпадал).")
-                except Exception as e:
-                    print(f"⚠️ Не удалось очистить topic у {ch.name}: {e}")
-
-        base_name = self.member.display_name.lower().replace(" ", "-")
-        new_name = base_name
-        i = 1
-        existing_names = [ch.name for ch in self.category.text_channels]
-        while new_name in existing_names:
-            new_name = f"{base_name}-{i}"
-            i += 1
-
-        overwrites = {
-            self.member.guild.default_role: PermissionOverwrite(view_channel=False),
-            self.member: PermissionOverwrite(view_channel=True, send_messages=True),
-        }
-        bot_member = self.category.guild.me
-        if bot_member:
-            overwrites[bot_member] = PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        new_channel = await self.category.create_text_channel(
-            new_name, overwrites=overwrites, topic=str(self.member.id)
-        )
-
-        await interaction.response.send_message(
-            f"✅ Создан новый личный канал {new_channel.mention}.", ephemeral=True
-        )
-        if self.feedback_channel:
-            await self.feedback_channel.send(
-                f"🆕 Создан новый личный канал {new_channel.mention} для {self.member.mention}. "
-                f"Старые topic с ID были очищены."
-            )
-        await self._delete_original_message(interaction)
-
-
-    @ui.button(label="Добавить в существующий", style=discord.ButtonStyle.success)
-    async def add_to_existing(self, interaction: discord.Interaction, button: ui.Button):
-        """Добавление пользователя в существующий канал."""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "⛔ Только администратор может выполнять это действие.", ephemeral=True
-            )
-            await self._delete_original_message(interaction)
-            return
-
-        await self.existing_channel.set_permissions(
-            self.member,
-            view_channel=True,
-            send_messages=True,
-            read_message_history=True,
-        )
-        bot_member = interaction.guild.me
-        if bot_member:
-            await self.existing_channel.set_permissions(
-                bot_member,
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-            )
-        await interaction.response.send_message(
-            f"✅ Пользователь добавлен в существующий канал {self.existing_channel.mention}.",
-            ephemeral=True,
-        )
-        await self._delete_original_message(interaction)
-
-
-
-class DeleteChannelView(ui.View):
-    """Выбор при уходе пользователя: удалить или оставить канал."""
-
-    def __init__(self, channel: discord.TextChannel, feedback_channel: discord.TextChannel = None):
-        super().__init__(timeout=None)
-        self.channel = channel
-        self.channel_id = channel.id  # сохраняем ID канала
-        self.feedback_channel = feedback_channel
-        self.message = None  # сюда сохраним ссылку на сообщение с кнопками
-
-    async def _delete_original_message(self, interaction: discord.Interaction):
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
-
-    @ui.button(label="Удалить канал", style=discord.ButtonStyle.danger)
-    async def delete_channel(self, interaction: discord.Interaction, button: ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("⛔ Только администратор может это делать.", ephemeral=True)
-            await self._delete_original_message(interaction)
-            return
-
-        try:
-            await self.channel.delete(reason="Удалён после выхода участника.")
-            await interaction.response.send_message(f"✅ Канал **{self.channel.name}** удалён.", ephemeral=True)
-            if self.feedback_channel:
-                await self.feedback_channel.send(f"🗑️ Канал **{self.channel.name}** удалён по решению {interaction.user.mention}.")
-        except Exception as e:
-            await interaction.response.send_message(f"⚠️ Ошибка при удалении канала: {e}", ephemeral=True)
-        finally:
-            await self._delete_original_message(interaction)
-
-    @ui.button(label="Не удалять", style=discord.ButtonStyle.success)
-    async def keep_channel(self, interaction: discord.Interaction, button: ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("⛔ Только администратор может это делать.", ephemeral=True)
-            await self._delete_original_message(interaction)
-            return
-
-        await interaction.response.send_message(f"✅ Канал **{self.channel.name}** сохранён.", ephemeral=True)
-        if self.feedback_channel:
-            await self.feedback_channel.send(f"📁 Канал **{self.channel.name}** сохранён по решению {interaction.user.mention}.")
-        await self._delete_original_message(interaction)
-
 
 class EventsCog(commands.Cog):
     """События Discord: регистрация, структура групп, логирование."""
@@ -506,7 +355,7 @@ class EventsCog(commands.Cog):
             # ⚠️ Новый лог и вызов интерактивного выбора
             await self.log_action(guild, f"⚠️ Личный канал {personal_channel.name} уже существует для {member.display_name}.")
             feedback = await self.get_or_create_feedback_channel(guild)
-            view = ChannelConflictView(member, category, personal_channel)
+            view = ChannelConflictView(member, category, personal_channel, feedback)
             await feedback.send(
                 f'⚠️ Текстовый канал "{member.display_name}" в категории "{category.name}" уже существует.\n'
                 f'Выберите действие:',
@@ -550,55 +399,28 @@ class EventsCog(commands.Cog):
             await channel.edit(overwrites=overwrites)
             await self.log_action(guild, "📩 Канал #неизвестные найден, права доступа обновлены.")
 
-    async def get_or_create_feedback_channel(self, guild: discord.Guild) -> discord.TextChannel:
-        """Возвращает канал feedback, создавая при необходимости.
-        Размещает его в категории с названием бота."""
-        bot_name = guild.me.display_name if guild.me else "Bot"
+    async def get_or_create_feedback_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        """Возвращает (или создаёт) канал обратной связи для сервера."""
+        cached = self.feedback_channels.get(guild.id)
+        if cached and cached.guild:
+            return cached
 
-        # 🗂️ Ищем категорию с именем бота
-        category = discord.utils.get(guild.categories, name=bot_name)
-        if not category:
+        channel = await ensure_feedback_channel(guild)
+        if channel:
+            self.feedback_channels[guild.id] = channel
+        return channel
+
+    async def log_action(self, guild: discord.Guild, message: str) -> None:
+        """Отправляет событие в канал обратной связи (с запасным логированием)."""
+        channel = await self.get_or_create_feedback_channel(guild)
+        if channel:
             try:
-                category = await guild.create_category(bot_name)
-                print(f"📁 Создана категория {bot_name}")
-            except Exception as e:
-                print(f"⚠️ Не удалось создать категорию {bot_name}: {e}")
-                category = None
+                await channel.send(message)
+                return
+            except Exception:
+                pass
+        await send_feedback_message(guild, message)
 
-        # 🔍 Проверяем существование канала feedback
-        feedback = discord.utils.get(guild.text_channels, name=f"{bot_name.lower()}-feedback")
-        if feedback:
-            # Если канал найден, но не в нужной категории — перемещаем
-            if feedback.category != category and category:
-                await feedback.edit(category=category)
-            return feedback
-
-        # 🆕 Создаём новый канал в категории
-        try:
-            overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-            }
-            feedback = await guild.create_text_channel(
-                f"{bot_name.lower()}-feedback",
-                category=category,
-                overwrites=overwrites
-            )
-            print(f"📝 Создан канал {feedback.name} в категории {bot_name}")
-            await feedback.send(f"📣 Канал создан автоматически для логов и сообщений от {bot_name}.")
-            return feedback
-        except Exception as e:
-            print(f"⚠️ Не удалось создать канал feedback: {e}")
-            return None
-
-
-    async def log_action(self, guild: discord.Guild, message: str):
-        """Пишет сообщение в feedback-канал."""
-        fb = self.feedback_channels.get(guild.id)
-        if not fb:
-            fb = await self.get_or_create_feedback_channel(guild)
-            self.feedback_channels[guild.id] = fb
-        await fb.send(message)
 
 
 async def setup(bot: commands.Bot):
