@@ -1,4 +1,7 @@
+
 *.sqlite3
+database.sqlite3-shm
+database.sqlite3-wal
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -7,6 +10,9 @@ __pycache__/
 
 # C extensions
 *.so
+
+*shm
+*-wal
 
 # Distribution / packaging
 .Python
@@ -137,7 +143,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+# .env
 .envrc
 .venv
 env/

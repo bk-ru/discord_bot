@@ -423,8 +423,6 @@ class EventsCog(commands.Cog):
                 pass
         await send_feedback_message(guild, message)
 
-
-
 async def setup(bot: commands.Bot):
     """Extension entry point for discord.py."""
     await bot.add_cog(EventsCog(bot))

@@ -185,10 +185,23 @@ class GroupManagementCog(commands.Cog):
         category = discord.utils.get(guild.categories, name=group_name)
         if category:
             try:
+                # Сначала удаляем все каналы внутри категории
+                for channel in category.channels:
+                    try:
+                        await channel.delete(reason="Удаление каналов учебной группы")
+                    except discord.Forbidden:
+                        statuses.append(f"нет прав удалить канал {channel.name}")
+                    except Exception as e:
+                        statuses.append(f"ошибка при удалении канала {channel.name}: {e}")
+
+                # Теперь удаляем саму категорию
                 await category.delete(reason="Удаление учебной группы")
-                statuses.append("категория удалена вместе с каналами")
+                statuses.append("категория и все каналы удалены")
             except discord.Forbidden:
                 statuses.append("нет прав удалить категорию")
+            except Exception as e:
+                statuses.append(f"ошибка при удалении категории: {e}")
+
         else:
             # На случай старой структуры проверим одиночный канал
             channel_name = group_name.lower().replace(" ", "-")
@@ -210,8 +223,6 @@ class GroupManagementCog(commands.Cog):
             await ctx.send("⛔ Эта команда только для администраторов.")
         else:
             await ctx.send(f"❌ Ошибка: {error}")
-
-
 
 async def setup(bot):
     await bot.add_cog(GroupManagementCog(bot))

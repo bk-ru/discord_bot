@@ -35,8 +35,6 @@ class LabsCog(commands.Cog):
                 pass
         await send_feedback_message(guild, text)
 
-
-
     # -------------------- Команды студента --------------------
 
     @commands.command(name="submit")
@@ -473,9 +471,6 @@ class LabsCog(commands.Cog):
         )
 
         return teacher_channel
-
-
-
     
     async def _post_to_teacher_channel(
         self,
