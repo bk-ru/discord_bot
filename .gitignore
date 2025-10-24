@@ -13,6 +13,7 @@ __pycache__/
 
 *shm
 *-wal
+*.xlsx
 
 # Distribution / packaging
 .Python
