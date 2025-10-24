@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 
 import re
 import traceback
@@ -6,6 +7,7 @@ from typing import Tuple
 
 import discord
 from discord import ButtonStyle, Interaction, ui
+from tortoise.queryset import QuerySet  # type: ignore
 
 from database.models import LabWork, User
 from utils.feedback import send_feedback_message
@@ -32,6 +34,9 @@ class LabReviewView(ui.View):
                 user_obj = self.labwork.user
             except Exception:
                 user_obj = await User.get_or_none(id=getattr(self.labwork, "user_id", None))
+
+        if isinstance(user_obj, QuerySet):
+            user_obj = await user_obj.first()
 
         discord_member = None
         discord_id = getattr(user_obj, "discord_id", None) if user_obj else None
@@ -99,18 +104,44 @@ class LabReviewView(ui.View):
     ) -> None:
         """Сохраняет статус, уведомляет студента, очищает сообщение преподавателя."""
         self.labwork.status = status
+        update_fields: list[str] = ['status']
         if feedback is not None:
             self.labwork.feedback = feedback
+            update_fields.append('feedback')
         try:
-            await self.labwork.save(update_fields=["status", "feedback"])
+            await self.labwork.save(update_fields=update_fields)
         except Exception as error:
             guild = interaction.guild
             if guild:
-                await send_feedback_message(guild, f"❌ save(status/feedback) failed: {error}")
+                await send_feedback_message(guild, f'❌ save(status/feedback) failed: {error}')
+
+        wait_for_file = status == 'на доработке'
+        response_text = teacher_reply
+        if wait_for_file:
+            response_text += "\n\n📎 Прикрепите исправленный документ ответным сообщением в течение 60 секунд, если он готов."
+        await safe_respond(interaction, response_text, ephemeral=True)
+
+        corrected_url = None
+        if wait_for_file:
+            corrected_url = await self._collect_corrected_file(interaction)
+            if corrected_url:
+                self.labwork.teacher_file_url = corrected_url
+                try:
+                    await self.labwork.save(update_fields=['teacher_file_url'])
+                except Exception as error:
+                    if interaction.guild:
+                        await send_feedback_message(interaction.guild, f'⚠️ save(teacher_file_url) failed: {error}')
 
         await self._notify_student_and_channel(interaction, status, feedback)
-        await safe_respond(interaction, teacher_reply, ephemeral=True)
         await self._delete_teacher_message(interaction)
+
+        if status == "зачтено":
+            # При подтверждении зачёта удаляем сообщение с кнопками, чтобы избежать повторных действий
+            try:
+                if interaction.message:
+                    await interaction.message.delete()
+            except Exception:
+                pass
 
     async def _notify_student_and_channel(
         self,
@@ -129,6 +160,8 @@ class LabReviewView(ui.View):
             embed.add_field(name="Комментарий преподавателя", value=feedback, inline=False)
         if self.labwork.file_url:
             embed.add_field(name="Файл", value=self.labwork.file_url, inline=False)
+        if self.labwork.teacher_file_url:
+            embed.add_field(name='Исправленный файл', value=self.labwork.teacher_file_url, inline=False)
 
         if member:
             try:
@@ -156,6 +189,49 @@ class LabReviewView(ui.View):
                     await User.filter(id=user_obj.id).update(discord_id=member.id)
                 except Exception:
                     pass
+
+    async def _collect_corrected_file(self, interaction: Interaction) -> str | None:
+        channel = interaction.channel
+        if channel is None or not hasattr(channel, 'id'):
+            return None
+
+        try:
+            await interaction.followup.send(
+                "📎 Если хотите приложить исправленный документ, отправьте сообщение с файлом в этот канал в течение 60 секунд. Можно пропустить.",
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+
+        def check(message: discord.Message) -> bool:
+            return (
+                message.author.id == interaction.user.id
+                and message.channel.id == channel.id
+                and bool(message.attachments)
+            )
+
+        try:
+            response = await interaction.client.wait_for('message', timeout=60, check=check)
+        except asyncio.TimeoutError:
+            try:
+                await interaction.followup.send('⏳ Время ожидания истекло. Файл не получен.', ephemeral=True)
+            except Exception:
+                pass
+            return None
+
+        attachment = response.attachments[0]
+        try:
+            await interaction.followup.send('✅ Исправленный файл сохранён.', ephemeral=True)
+        except Exception:
+            pass
+
+        if interaction.guild:
+            await send_feedback_message(
+                interaction.guild,
+                f'📎 {interaction.user.mention} приложил исправленный файл для лабораторной №{self.labwork.lab_number}: {attachment.url}',
+            )
+
+        return attachment.url
 
     async def _delete_teacher_message(self, interaction: Interaction) -> None:
         """Удаляет сообщение с кнопками из канала преподавателя и очищает ссылки."""

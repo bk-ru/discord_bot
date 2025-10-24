@@ -86,7 +86,7 @@ class LabsCog(commands.Cog):
             lab, created = await LabWork.get_or_create(
                 user=user,
                 lab_number=lab_number,
-                defaults={"file_url": file_url, "status": "отправлено"}
+                defaults={"file_url": file_url, "status": "отправлено", "teacher_file_url": None}
             )
             if created:
                 # запись уже с нужными полями
@@ -96,6 +96,7 @@ class LabsCog(commands.Cog):
                 await LabWork.filter(user=user, lab_number=lab_number).update(
                     file_url=file_url,
                     status="отправлено",
+                    teacher_file_url=None,
                 )
                 lab = await LabWork.get(user=user, lab_number=lab_number)  # теперь НЕ partial
 
@@ -162,6 +163,8 @@ class LabsCog(commands.Cog):
             embed.add_field(name="Комментарий преподавателя", value=lab.feedback, inline=False)
         if lab.file_url:
             embed.add_field(name="Файл", value=lab.file_url, inline=False)
+        if lab.teacher_file_url:
+            embed.add_field(name='Исправленный файл', value=lab.teacher_file_url, inline=False)
 
         await ctx.send(embed=embed)
 
@@ -202,10 +205,24 @@ class LabsCog(commands.Cog):
 
         lab.status = "на доработке"
         lab.feedback = comment
+        corrected_url = None
+        if ctx.message.attachments:
+            attachment = ctx.message.attachments[0]
+            corrected_url = attachment.url
+            lab.teacher_file_url = corrected_url
         await lab.save()
-        await ctx.send(f"🛠️ Лабораторная №{lab_number} студента {student.mention} отправлена на доработку.")
-        await student.send(f"🛠️ Твоя лабораторная №{lab_number} отправлена на доработку.\nКомментарий: {comment}")
 
+        await ctx.send(f"🛠️ Лабораторная №{lab_number} студента {student.mention} отправлена на доработку.")
+
+        student_message = f'🛠️ Твоя лабораторная №{lab_number} отправлена на доработку.\nКомментарий: {comment}'
+        if corrected_url:
+            student_message += f'\nИсправленный файл: {corrected_url}'
+            await ctx.send(f'📎 Исправленный файл для студента: {corrected_url}')
+            await self._log_feedback(
+                ctx.guild,
+                f'📎 {ctx.author.mention} приложил исправленный файл для лабораторной №{lab_number}: {corrected_url}'
+            )
+        await student.send(student_message)
     @commands.has_permissions(administrator=True)
     @commands.command(name="accept")
     async def accept_lab(self, ctx, student: discord.Member, lab_number: int):
@@ -284,7 +301,6 @@ class LabsCog(commands.Cog):
         await ctx.send(f"📎 Файл лабораторной №{lab_number} студента {student.mention}: {lab.file_url}")
 
     @commands.has_permissions(administrator=True)
-    @commands.command(name="resubmitlab")
     async def resubmit_lab(self, ctx, student: discord.Member, lab_number: int):
         """Заменить файл лабораторной и повторно отправить работу на проверку."""
         if not ctx.message.attachments:
@@ -307,6 +323,7 @@ class LabsCog(commands.Cog):
         await LabWork.filter(id=lab.id).update(
             file_url=file_url,
             status="отправлено",
+            teacher_file_url=None,
         )
         lab = await LabWork.get(id=lab.id)
 
