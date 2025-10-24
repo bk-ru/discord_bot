@@ -1,7 +1,7 @@
 
 *.sqlite3
-database.sqlite3-shm
-database.sqlite3-wal
+*.SQLITE3-SHM
+*.sqlite3-wal
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
