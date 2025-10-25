@@ -77,12 +77,7 @@ DISCORD_TOKEN=your_token_here
 | `utils/` | Вспомогательные функции (работа с Excel, feedback‑каналы). |
 | `database/` | ORM‑модели и инициализация базы. |
 | `migrations/` | Настройки Aerich. |
-| `database.sqlite3` | SQLite‑база (можно использовать готовую или удалить для чистого старта). |
-| `students.xlsx` | Excel‑таблица с группами и студентами. |
 | `requirements.txt` | Список Python‑зависимостей. |
-| `docs/` | UML‑диаграмма и справочные материалы. |
-
-> Если вы хотите начать с чистой базы, удалите `database.sqlite3`, `database.sqlite3-shm`, `database.sqlite3-wal` и создайте новые данные командой `python bot.py` (Tortoise создаст таблицы автоматически). Файл `students.xlsx` можно заменить пустым или собственным списком групп.
 
 ---
 
